@@ -27,8 +27,13 @@ wait_healthy() { # 60s 内探活
   . "$DATA/env.sh"
   while [ $i -lt 12 ]; do
     sleep 5
-    code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${APP_PORT:-20128}/v1/models" 2>/dev/null)
-    if [ "$code" = "200" ] || [ "$code" = "307" ]; then echo healthy; return 0; fi
+    # 用静态资源探活：/v1/models 要枚举全部 provider，手机上 10s+，
+    # 5s 超时会把它误判为不健康，导致更新成功却被回滚。
+    code=$(curl -s -m 10 -o /dev/null -w "%{http_code}" \
+      "http://127.0.0.1:${APP_PORT:-20128}/favicon.svg" 2>/dev/null)
+    case "$code" in
+      2*|3*) echo healthy; return 0 ;;
+    esac
     i=$((i + 1))
   done
   echo unhealthy

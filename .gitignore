@@ -9,3 +9,6 @@ tools/node-arm64/
 # 杂项
 .DS_Store
 *.log
+
+# 临时脚本/诊断目录（不入库）
+.tmp-*/

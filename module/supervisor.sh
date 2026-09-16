@@ -83,18 +83,46 @@ start_panel() {
 stop_core() { kill $(cat "$PIDFILE" 2>/dev/null) 2>/dev/null; rm -f "$PIDFILE"; }
 stop_panel() { kill $(cat "$PANEL_PIDFILE" 2>/dev/null) 2>/dev/null; rm -f "$PANEL_PIDFILE"; }
 
-health() {
-  # 没有 curl 就跳过 HTTP 探活（进程存活由主循环的 kill -0 保证），
-  # 否则探测永远失败会导致核心被反复重启
+# 探针：输出 HTTP 状态码，超时/连接失败输出空
+probe() { # $1=path $2=timeout(s) $3=Bearer key(可选)
+  if [ -n "${3:-}" ]; then
+    curl -s -m "$2" -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $3" \
+      "http://127.0.0.1:${APP_PORT:-20128}$1" 2>/dev/null
+  else
+    curl -s -m "$2" -o /dev/null -w "%{http_code}" \
+      "http://127.0.0.1:${APP_PORT:-20128}$1" 2>/dev/null
+  fi
+}
+
+# 存活探测（每轮，必须廉价）：
+# 只要求"能响应 HTTP 且不是 5xx"。不要用 /v1/models——它要枚举全部 provider，
+# 在手机上实测 10s+，用 5s 超时探测会把健康进程误判成故障并反复重启。
+health_alive() {
   [ -n "$HAVE_CURL" ] || return 0
   . "$DATA/env.sh"
-  url="http://127.0.0.1:${APP_PORT:-20128}/v1/models"
+  code=$(probe /favicon.svg 5)
+  [ -n "$code" ] || code=$(probe /next.svg 5)
+  case "$code" in
+    2*|3*|4*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 功能探测（低频）：真打 API，容忍慢（手机上 ~10s）
+health_api() {
+  [ -n "$HAVE_CURL" ] || return 0
+  . "$DATA/env.sh"
   if [ "${REQUIRE_API_KEY:-false}" = "true" ] && [ -n "${API_KEY:-}" ]; then
-    code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $API_KEY" "$url" 2>/dev/null)
+    code=$(probe /v1/models 25 "$API_KEY")
   else
-    code=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)
+    code=$(probe /v1/models 25)
   fi
   [ "$code" = "200" ] || [ "$code" = "307" ]
+}
+
+health_restart() {
+  stop_panel; stop_core; sleep 2
+  start_core && { CORE_PID=$(cat "$PIDFILE" 2>/dev/null); SINCE=$(date +%s); start_panel; }
 }
 
 wait_boot
@@ -107,6 +135,7 @@ log "守护进程就绪 (node=${NODE_VER:-未知}, curl=${HAVE_CURL:-无})"
 FAILURES=0
 SINCE=$(date +%s)
 STOPPED=0
+HEALTH_FAILS=0
 
 # 读一次配置：HEALTH_INTERVAL 可调大以减少唤醒/探测开销
 . "$DATA/env.sh"
@@ -165,7 +194,26 @@ while true; do
   [ $((TICKS % ROTATE_EVERY)) -eq 0 ] && rotate
 
   # 健康检查（默认每 60s，可由 env.sh 的 HEALTH_INTERVAL 调整）
+  #   存活探测：每轮，廉价（静态资源）；连续 3 次失败才重启，避免误杀
+  #   功能探测：每 5 个健康周期（约 5 分钟）打一次 /v1/models，失败仅告警
   if [ "${STOPPED:-0}" != "1" ] && [ $((TICKS % HEALTH_EVERY)) -eq 0 ]; then
-    health || { log "健康检查失败，重启服务"; stop_panel; stop_core; sleep 2; start_core && CORE_PID=$(cat "$PIDFILE" 2>/dev/null); start_panel; }
+    if health_alive; then
+      HEALTH_FAILS=0
+    else
+      HEALTH_FAILS=$((HEALTH_FAILS + 1))
+      log "存活探测失败 ${HEALTH_FAILS}/3（code=${code:-超时}）"
+      if [ "$HEALTH_FAILS" -ge 3 ]; then
+        log "连续 3 次存活探测失败，重启服务"
+        health_restart
+        HEALTH_FAILS=0
+      fi
+    fi
+    if [ $((TICKS % (HEALTH_EVERY * 5))) -eq 0 ]; then
+      if health_api; then
+        log "API 探测正常（code=$code）"
+      else
+        log "API 探测异常（code=${code:-超时}）：/v1/models 较慢时属正常，仅告警不重启"
+      fi
+    fi
   fi
 done
