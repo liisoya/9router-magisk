@@ -71,7 +71,7 @@ chmod 0755 "$MODDIR/control-center.cjs" 2>/dev/null
 #    这里把旧模块目录整体移除，数据区 $DATA 保持不变，用户配置不丢。
 LEGACY=/data/adb/modules/9router
 if [ -d "$LEGACY" ] && [ "$MODDIR" != "$LEGACY" ]; then
-  ui_print "  检测到旧模块目录 $LEGACY（旧 ID 在 ReSukiSU 上不可用）"
+  ui_print "  检测到旧模块目录 $LEGACY（旧 ID 数字开头，在 ReSukiSU/KernelSU-Next 等分支上不可用）"
   for f in supervisor.pid 9router.pid panel.pid; do
     P=$(cat "$DATA/$f" 2>/dev/null)
     [ -n "$P" ] && kill "$P" 2>/dev/null
