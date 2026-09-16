@@ -33,14 +33,16 @@
 
 ```
 /data/adb/modules/ksu_9router/     # 模块 ID 必须以字母开头（ReSukiSU 校验 /^[a-zA-Z][a-zA-Z0-9._-]+$/）
-  runtime/bin/node.bin            # 只读运行时
+  runtime/bin/node.bin            # 只读运行时（安装源；另在数据区留镜像，见下）
   runtime/lib/*.so, cacert.pem
   versions/0.5.75/…               # 每版一份应用产物
   versions/0.5.79/…
   app -> versions/0.5.75          # 原子切换（symlink）
   module.prop  service.sh  action.sh  uninstall.sh
   supervisor.sh  www/control-center.cjs(可选)
-/data/adb/9router/                # 数据区（模块外，更新/重装不丢）
+/data/adb/9router/                # 数据区（模块外，更新/重装不丢；管理器不碰）
+  runtime/                        # node 运行时镜像：模块目录那份丢失时靠它续命（RUNTIME_MIRROR=0 可关）
+  bin/9router                     # CLI 副本：模块目录被清空后仍能执行 doctor/repair
   data/                           # DATA_DIR：db/data.sqlite、backups、machine-id、jwt-secret
   tmp/                            # TMPDIR
   log/service.log                 # 轮转 512KB ×2
@@ -308,6 +310,8 @@ CI（`.github/workflows/`，**全部 `workflow_dispatch`，无 schedule**）：
 | 10 | 上游 distro 目录名可能变化（今天是 `.next-cli-build`） | 脚本**不假设目录名**：直接整体替换 `versions/<ver>` 目录内容。 |
 | 11 | 端口被占用 / 多实例 | 启动前检查端口；supervisor 用 PID 文件 + `kill -0` 做单实例锁，避免重复拉起抢端口。 |
 | 12 | 网络 | 构建机直连 npm/Termux 已验证可达（200）；若失败自动回退 `PROXY=${PROXY:-socks5://127.0.0.1:7890}`。 |
+| 13 | **运行时是单点**：`runtime/` 只放在模块目录里，而该目录由管理器管理（安装换入 → `modules_update`、模块镜像、清理都可能重写它） | **数据区再放一份镜像**（`$DATA/runtime`，`customize.sh` 安装时落地）：`supervisor.sh` 开机校验两份（存在 + 真能跑出 `-v`），可用者优先（镜像优先，因为管理器不碰数据区），并自动互相补齐；两份都坏时回退系统 node，全无则**长退避（300s）+ 明确日志**，不再按"崩溃"刷屏。同时**删除 r3 里"开机时 `rm -rf` 旧 ID 目录 + 写 `remove` 标记"的破坏性清理**——`remove` 是"下次开机才生效"的删除指令，一旦旧目录与自身模块目录存在软链/镜像别名，等于把模块交给管理器删（症状正是"用得好好的，重启一次后 `runtime/bin/node.bin` 消失"）；旧 ID 清理只保留在安装期，且加了"真目录（非软链）+ `module.prop` id 匹配"两道校验。 |
+| 14 | 远程排查无证据 | 新增 `9router doctor`：一次性输出运行时两份状态（大小/权限/能否执行）、`linker64`、系统工具、模块管理器痕迹（旧 ID / `remove` / `disable` / `modules_update`）、`df`、日志尾部；另有 `9router repair [zip]` 一键恢复运行时。 |
 
 ---
 

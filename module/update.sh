@@ -6,8 +6,30 @@
 MODDIR=${MODDIR:-$(dirname "$0")}
 DATA=/data/adb/9router
 TMP=$DATA/tmp
-NODE=$MODDIR/runtime/bin/node.bin
-export LD_LIBRARY_PATH=$MODDIR/runtime/lib
+
+# 运行时解析：与 supervisor.sh 一致，优先数据区镜像（模块目录被管理器清理时仍可用）
+NODE=""
+NODELIB=""
+for _rt in "$DATA/runtime" "$MODDIR/runtime"; do
+  [ -x "$_rt/bin/node.bin" ] || continue
+  _v=$( { LD_LIBRARY_PATH="$_rt/lib" "$_rt/bin/node.bin" -v; } 2>/dev/null )
+  case "$_v" in
+    v[0-9]*) NODE=$_rt/bin/node.bin; NODELIB=$_rt/lib; break ;;
+  esac
+done
+[ -n "$NODE" ] || { echo "node 运行时不可用：请执行 9router doctor（或 9router repair）后重试"; exit 1; }
+export LD_LIBRARY_PATH=$NODELIB
+
+# 版本号白名单：版本号会被拼进 paths（versions/<ver>/app），
+# 必须挡住 "."/".."/含 "/" 的输入，否则 rm -rf/mv 会越界到模块目录别处
+valid_ver() {
+  case "$1" in
+    ""|.|..) return 1 ;;
+    */*|*..*) return 1 ;;
+    *[!0-9A-Za-z._-]*) return 1 ;;
+  esac
+  return 0
+}
 
 mkdir -p "$TMP" 2>/dev/null
 CUR=$(cat "$DATA/current-version" 2>/dev/null)
@@ -42,6 +64,7 @@ wait_healthy() { # 60s 内探活
 
 install_tgz() { # $1=tarball $2=版本
   [ -s "$1" ] || { echo "包不存在或为空: $1"; return 1; }
+  valid_ver "$2" || { echo "非法版本号: $2"; return 1; }
   work="$TMP/unpack.$$"
   rm -rf "$work"; mkdir -p "$work"
   tar xzf "$1" -C "$work" || { echo "解包失败"; rm -rf "$work"; return 1; }
@@ -59,6 +82,7 @@ install_tgz() { # $1=tarball $2=版本
 do_update() { # $1=版本
   ver="$1"
   [ -n "$ver" ] || { echo "需要版本号"; return 1; }
+  valid_ver "$ver" || { echo "非法版本号: $ver"; return 1; }
   if [ -d "$MODDIR/versions/$ver/app" ] && [ "$ver" = "$CUR" ]; then
     echo "当前已是 $ver（如需重装请先删除 $MODDIR/versions/$ver）"; return 0
   fi
@@ -103,7 +127,7 @@ case "${1:-}" in
     [ -s "$file" ] || { echo "用法: 9router update-local <tarball>"; exit 1; }
     base=$(basename "$file" .tgz)
     ver=${base#9router-}
-    [ -n "$ver" ] || ver="local-$(date +%s)"
+    valid_ver "$ver" || ver="local-$(date +%s)"
     install_tgz "$file" "$ver" || exit 1
     switch_to "$ver"
     echo "已从本地包安装 $ver"

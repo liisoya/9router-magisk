@@ -78,6 +78,29 @@ API Key  : sk-xxxxxx
 - **应用**：`9router update` 在设备内完成，自动校验并支持回滚
 - **模块**：管理器模块页会依据本仓库 Release 提示更新，点一下刷入即可（应用数据不受影响）
 
+## 故障排查
+
+服务起不来时，先在手机终端跑一条命令（模块目录即使被清理过也能跑，安装时会在数据区留一份 CLI）：
+
+```bash
+9router doctor        # 或 /data/adb/9router/bin/9router doctor
+```
+
+它会一次列出：node 运行时（模块自带 + 数据区镜像两份，各自的大小/权限/能否执行）、模块目录与 `versions`、`app` 软链、
+`/system/bin/linker64`、系统工具是否齐全、模块管理器痕迹（旧 ID 残留 / `remove` / `disable` / `modules_update`）、
+磁盘与日志尾部 —— 直接整段贴回反馈即可定位。
+
+| 现象 | 可能原因 | 处理 |
+|---|---|---|
+| 日志出现 `runtime/bin/node.bin: No such file or directory` | 模块目录里的运行时文件被管理器"换入/镜像/清理"弄丢（或文件在但已损坏、系统 ELF 解释器不可达） | 服务会自动改用数据区那份运行时镜像（`$DATA/runtime`），无需干预；两份都没了用 `9router repair <刷机包.zip>` |
+| 日志连续刷 `核心服务启动失败` / `连续失败 N 次` | 核心进程启动即退出或反复崩溃 | `9router log` 看上方原始报错；应用更新后出问题用 `9router rollback` |
+| `9router doctor` 显示 `linker64=缺失` | 系统/挂载层问题，不是模块文件缺失 | 重启一次；仍异常请把 doctor 输出贴回（属于 magisk/KernelSU 挂载层问题） |
+| 想省下运行时镜像占的约 88MB | — | 在 `/data/adb/9router/env.sh` 里设 `RUNTIME_MIRROR=0`，再 `rm -rf /data/adb/9router/runtime` |
+
+> 运行时为什么要存两份：`/data/adb/modules/<id>` 由模块管理器管理（安装换入、模块镜像、清理都可能重写它），
+> 历史上出现过重启后 `runtime/bin/node.bin` 消失导致服务再也起不来；`/data/adb/9router` 是我们自己的数据区，
+> 管理器不碰。开机时两份都会校验，可用者优先，并自动互相补齐。
+
 ## 卸载
 
 管理器里移除模块即可（会先停掉守护进程与服务）。

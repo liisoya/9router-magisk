@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # 9Router 命令行入口（仅白名单操作）
 # 本脚本位于 <模块目录>/system/bin/9router，需要回退三级才是模块目录；
-# 若通过 PATH 以裸名调用（$0 不含 /），再用已挂载的模块目录兜底。
+# 安装时还会复制一份到 <数据区>/bin/9router（模块目录被清空后仍可用 doctor/repair）。
 DATA=/data/adb/9router
 ENV=$DATA/env.sh
 
@@ -10,16 +10,42 @@ case "$0" in
   *)   MODDIR="" ;;
 esac
 if [ -z "$MODDIR" ] || [ ! -f "$MODDIR/update.sh" ]; then
+  # 数据区那份 9router / PATH 裸名调用：按 module.prop 的 id 反查模块目录
   MODDIR=""
-  for _cand in /data/adb/modules/*/system/bin/9router; do
-    [ -f "$_cand" ] || continue
-    _dir=${_cand%/system/bin/9router}
-    if [ -f "$_dir/update.sh" ]; then MODDIR=$_dir; break; fi
+  for _d in /data/adb/modules/*/; do
+    _d=${_d%/}
+    [ -f "$_d/update.sh" ] || continue
+    if [ -f "$_d/module.prop" ] && grep -q '^id=ksu_9router' "$_d/module.prop" 2>/dev/null; then
+      MODDIR=$_d; break
+    fi
   done
 fi
 
 [ -f "$ENV" ] || { echo "未安装或未初始化: $ENV"; exit 1; }
 . "$ENV"
+
+NODE=""
+NODELIB=""
+NODEVER=""
+
+# 运行时解析：优先数据区镜像（模块目录被管理器清理时仍可用），再模块自带，最后系统 node
+pick_node() {
+  for _rt in "$DATA/runtime" "$MODDIR/runtime"; do
+    [ -n "$_rt" ] || continue
+    [ -x "$_rt/bin/node.bin" ] || continue
+    # 用 {} 包住：损坏的 ELF 会让 shell 额外打一行 "Segmentation fault"，子进程的 2>/dev/null 挡不住
+    _v=$( { LD_LIBRARY_PATH="$_rt/lib" "$_rt/bin/node.bin" -v; } 2>/dev/null )
+    case "$_v" in
+      v[0-9]*) NODE=$_rt/bin/node.bin; NODELIB=$_rt/lib; NODEVER=$_v; return 0 ;;
+    esac
+  done
+  _s=$(command -v node 2>/dev/null)
+  if [ -n "$_s" ]; then
+    _v=$("$_s" -v 2>/dev/null)
+    case "$_v" in v[0-9]*) NODE=$_s; NODELIB=""; NODEVER=$_v; return 0 ;; esac
+  fi
+  return 1
+}
 
 usage() {
   cat <<'EOF'
@@ -29,6 +55,8 @@ usage() {
   stop             停止服务
   restart          重启服务
   status           查看状态（含地址与当前密码）
+  doctor           诊断：运行时/模块目录/系统环境/管理器痕迹（出问题时先跑这个）
+  repair [zip]     修复运行时（默认从模块目录同步；也可指定刷机包 zip）
   log              查看服务日志（最近 40 行）
   update [版本]     在线更新应用（默认取上游最新正式版）
   update-local 文件 用本地 tarball 安装（离线/代理场景）
@@ -50,6 +78,11 @@ ips() {
     | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | tr '\n' ' '
 }
 
+fstat() { # $1=文件 -> "大小 权限"
+  [ -f "$1" ] || { echo "-"; return; }
+  printf '%s %s' "$(wc -c < "$1" 2>/dev/null | tr -d ' \n')" "$(ls -l "$1" 2>/dev/null | awk '{print $1}')"
+}
+
 status() {
   CORE=$(cat "$DATA/9router.pid" 2>/dev/null)
   PANEL=$(cat "$DATA/panel.pid" 2>/dev/null)
@@ -57,12 +90,111 @@ status() {
   echo "版本      : ${VER:-未知}"
   echo "核心服务  : $([ -n "$CORE" ] && kill -0 "$CORE" 2>/dev/null && echo "运行中 PID=$CORE" || echo 已停止)"
   echo "控制面板  : $([ -n "$PANEL" ] && kill -0 "$PANEL" 2>/dev/null && echo "运行中 PID=$PANEL" || echo 已停止)"
+  if pick_node; then
+    case "$NODE" in
+      "$DATA"/runtime/*) FROM=数据区镜像 ;;
+      "$MODDIR"/runtime/*) FROM=模块目录 ;;
+      *) FROM=系统 ;;
+    esac
+    echo "运行时    : $NODEVER ($FROM)"
+  else
+    echo "运行时    : 不可用（执行 9router doctor 查看原因）"
+  fi
   echo "监听      : ${BIND_HOST:-0.0.0.0}:${APP_PORT:-20128}"
   echo "本机地址  : $(ips)"
   echo "Dashboard : http://$(ips | awk '{print $1}' || echo 127.0.0.1):${APP_PORT:-20128}/dashboard"
   echo "初始密码  : ${INITIAL_PASSWORD:-123456}"
   [ -n "${API_KEY:-}" ] && echo "局域网Key : $API_KEY"
   return 0
+}
+
+# 诊断：把"模块文件是否被清理/镜像丢失" 与 "系统工具/链接器是否可用" 分开呈现。
+# 用户把这段输出贴回来即可定位（无需 root 之外的特殊工具）。
+doctor() {
+  echo "==== 9Router 诊断 $(date '+%F %T' 2>/dev/null) ===="
+  echo "[基本]"
+  echo "  数据区     : $DATA"
+  echo "  模块目录   : ${MODDIR:-未找到}"
+  [ -n "$MODDIR" ] && [ -f "$MODDIR/module.prop" ] && echo "  模块版本   : $(grep -E '^(version|versionCode)=' "$MODDIR/module.prop" 2>/dev/null | tr '\n' ' ')"
+  echo "  应用版本   : $(cat "$DATA/current-version" 2>/dev/null || echo 未知)"
+  echo "  守护进程   : $(cat "$DATA/supervisor.pid" 2>/dev/null || echo 无)"
+  echo "  core/panel : $(cat "$DATA/9router.pid" 2>/dev/null || echo 无) / $(cat "$DATA/panel.pid" 2>/dev/null || echo 无)"
+
+  echo "[node 运行时]（两份互为备份，任一可用即可运行）"
+  for _rt in "$MODDIR/runtime" "$DATA/runtime"; do
+    [ -n "$_rt" ] || continue
+    _b=$_rt/bin/node.bin
+    if [ -f "$_b" ]; then
+      _v=$( { LD_LIBRARY_PATH="$_rt/lib" "$_b" -v; } 2>/dev/null )
+      echo "  $_rt : $(fstat "$_b") lib文件数=$(ls "$_rt/lib" 2>/dev/null | wc -l | tr -d ' ') 可执行结果=${_v:-无法执行}"
+    else
+      echo "  $_rt : 缺失（node.bin 不存在）"
+    fi
+  done
+  if command -v sha256sum >/dev/null 2>&1; then
+    for _rt in "$MODDIR/runtime" "$DATA/runtime"; do
+      [ -f "$_rt/bin/node.bin" ] && echo "  sha256 $_rt/bin/node.bin = $(sha256sum "$_rt/bin/node.bin" 2>/dev/null | awk '{print $1}')"
+    done
+  fi
+
+  echo "[系统环境]"
+  echo "  linker64   : $([ -e /system/bin/linker64 ] && echo 存在 || echo 缺失) $(readlink /system/bin/linker64 2>/dev/null)"
+  echo "  /system/bin/sh: $([ -x /system/bin/sh ] && echo 可执行 || echo 异常)"
+  echo "  date/df    : $(date +%s 2>/dev/null || echo 异常) / $(df -h /data 2>/dev/null | tail -n 1)"
+  echo "  工具       : $(for t in getprop date df sleep curl unzip tar awk sed grep wc cp mv tr readlink; do command -v $t >/dev/null 2>&1 && printf '%s ' $t; done)"
+  echo "  SELinux    : $(cat /proc/self/attr/current 2>/dev/null)"
+
+  echo "[应用产物]"
+  if [ -n "$MODDIR" ]; then
+    echo "  app        : $(readlink "$MODDIR/app" 2>/dev/null || echo '（不是软链/不存在）')"
+    echo "  custom-server.js: $([ -f "$MODDIR/app/custom-server.js" ] && echo 存在 || echo 缺失)"
+    echo "  versions   : $(ls "$MODDIR/versions" 2>/dev/null | tr '\n' ' ')"
+    echo "  模块目录顶层:"; ls -la "$MODDIR" 2>/dev/null | sed 's/^/    /'
+  fi
+
+  echo "[模块管理器痕迹]（旧 ID 残留 / 待删除标记 / 待换入）"
+  ls -la /data/adb/modules 2>/dev/null | sed 's/^/    /'
+  for _m in /data/adb/modules/*/; do
+    _m=${_m%/}
+    [ -f "$_m/remove" ] && echo "    ! $_m 存在 remove 标记（下次开机会被删除）"
+    [ -f "$_m/disable" ] && echo "    - $_m 处于 disable 状态"
+  done
+  [ -d /data/adb/modules_update ] && { echo "  modules_update:"; ls -la /data/adb/modules_update 2>/dev/null | sed 's/^/    /'; }
+
+  echo "[日志尾部]"
+  tail -n 15 "$DATA/log/service.log" 2>/dev/null | sed 's/^/    /'
+  echo "==== 诊断结束（以上内容可整体贴回反馈） ===="
+}
+
+# 修复运行时：默认从模块目录同步到数据区；也可指定刷机包 zip 直接抽 runtime
+repair() {
+  ZIP="${1:-}"
+  if [ -n "$ZIP" ]; then
+    [ -f "$ZIP" ] || { echo "找不到文件: $ZIP"; exit 1; }
+    command -v unzip >/dev/null 2>&1 || { echo "系统没有 unzip，无法从 zip 修复；请改用模块目录同步"; exit 1; }
+    rm -rf "$DATA/runtime.new" 2>/dev/null
+    mkdir -p "$DATA/runtime.new" 2>/dev/null
+    unzip -o -q "$ZIP" 'runtime/*' -d "$DATA/runtime.new" || { echo "解包失败"; rm -rf "$DATA/runtime.new"; exit 1; }
+    [ -f "$DATA/runtime.new/runtime/bin/node.bin" ] || { echo "包里没有 runtime/bin/node.bin"; rm -rf "$DATA/runtime.new"; exit 1; }
+    rm -rf "$DATA/runtime" 2>/dev/null
+    mv "$DATA/runtime.new/runtime" "$DATA/runtime" || { echo "移动失败"; exit 1; }
+    rm -rf "$DATA/runtime.new" 2>/dev/null
+  else
+    [ -n "$MODDIR" ] && [ -f "$MODDIR/runtime/bin/node.bin" ] || {
+      echo "模块目录里没有可用的 runtime/bin/node.bin：请用 9router repair <刷机包.zip> 恢复"; exit 1; }
+    mkdir -p "$DATA/runtime/bin" "$DATA/runtime/lib" 2>/dev/null
+    cp "$MODDIR/runtime/bin/node.bin" "$DATA/runtime/bin/node.bin" || { echo "复制失败（/data 空间不足？）"; exit 1; }
+    chmod 0755 "$DATA/runtime/bin/node.bin" 2>/dev/null
+    for _f in "$MODDIR"/runtime/lib/*; do
+      [ -f "$_f" ] && cp "$_f" "$DATA/runtime/lib/" 2>/dev/null
+    done
+  fi
+  chmod 0755 "$DATA/runtime/bin/node.bin" 2>/dev/null
+  V=$( { LD_LIBRARY_PATH="$DATA/runtime/lib" "$DATA/runtime/bin/node.bin" -v; } 2>/dev/null )
+  case "$V" in
+    v[0-9]*) echo "运行时已修复: $DATA/runtime ($V)"; req restart ;;
+    *) echo "已写入 $DATA/runtime，但执行仍失败（$V）：多半是系统层面的问题，请跑 9router doctor 并把输出贴回反馈"; exit 1 ;;
+  esac
 }
 
 case "${1:-}" in
@@ -82,28 +214,30 @@ case "${1:-}" in
     esac ;;
   status|st) status ;;
   info) status ;;
+  doctor|diag) doctor ;;
+  repair|fix) shift; repair "${1:-}" ;;
   log) tail -n "${2:-40}" "$DATA/log/service.log" ;;
   setpw)
     [ -n "${2:-}" ] || { echo "需要指定密码"; exit 1; }
     sed -i "s|^INITIAL_PASSWORD=.*|INITIAL_PASSWORD=$2|" "$ENV"
     # 同步到模块详情里的描述（防忘记密码）
-    if [ -f "$MODDIR/module.prop" ]; then
+    if [ -n "$MODDIR" ] && [ -f "$MODDIR/module.prop" ]; then
       sed -i "s|\(Dashboard 密码: \)[^ ]*|\1$2|" "$MODDIR/module.prop"
     fi
     req restart
     echo "新密码: $2"
     ;;
-  versions) ls "$MODDIR/versions" 2>/dev/null ;;
+  versions) [ -n "$MODDIR" ] && ls "$MODDIR/versions" 2>/dev/null ;;
   key)
-    export LD_LIBRARY_PATH=$MODDIR/runtime/lib
-    exec "$MODDIR/runtime/bin/node.bin" "$MODDIR/apikeys.cjs" create "${2:-android-lan}"
+    pick_node || { echo "运行时不可用，执行 9router doctor"; exit 1; }
+    LD_LIBRARY_PATH=$NODELIB exec "$NODE" "$MODDIR/apikeys.cjs" create "${2:-android-lan}"
     ;;
   keys)
-    export LD_LIBRARY_PATH=$MODDIR/runtime/lib
-    exec "$MODDIR/runtime/bin/node.bin" "$MODDIR/apikeys.cjs" list
+    pick_node || { echo "运行时不可用，执行 9router doctor"; exit 1; }
+    LD_LIBRARY_PATH=$NODELIB exec "$NODE" "$MODDIR/apikeys.cjs" list
     ;;
-  rollback) exec sh "$MODDIR/update.sh" rollback ;;
-  update) exec sh "$MODDIR/update.sh" update "${2:-latest}" ;;
-  update-local) exec sh "$MODDIR/update.sh" local "${2:-}" ;;
+  rollback) [ -n "$MODDIR" ] && exec sh "$MODDIR/update.sh" rollback || echo "未找到模块目录" ;;
+  update) [ -n "$MODDIR" ] && exec sh "$MODDIR/update.sh" update "${2:-latest}" || echo "未找到模块目录" ;;
+  update-local) [ -n "$MODDIR" ] && exec sh "$MODDIR/update.sh" local "${2:-}" || echo "未找到模块目录" ;;
   *) usage ;;
 esac
