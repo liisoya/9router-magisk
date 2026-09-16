@@ -258,3 +258,55 @@ CI（`.github/workflows/`，**全部 `workflow_dispatch`，无 schedule**）：
 | 10 | 上游 distro 目录名可能变化（今天是 `.next-cli-build`） | 脚本**不假设目录名**：直接整体替换 `versions/<ver>` 目录内容。 |
 | 11 | 端口被占用 / 多实例 | 启动前检查端口；supervisor 用 PID 文件 + `kill -0` 做单实例锁，避免重复拉起抢端口。 |
 | 12 | 网络 | 构建机直连 npm/Termux 已验证可达（200）；若失败自动回退 `PROXY=${PROXY:-socks5://127.0.0.1:7890}`。 |
+
+---
+
+## 9. 构建与发布（维护者向，用户不必关心）
+
+### 9.1 本地构建
+
+```bash
+bash tools/fetch-runtime.sh    # 取 Termux 官方 aarch64 Node + 依赖（SHA256 校验，仅首次/换 Node 版本）
+bash tools/fetch-app.sh        # 取上游 npm 预构建产物（sha512 校验，换 9Router 版本时）
+bash tools/build-module.sh     # 组装 → dist/9router-Magisk-<版本>.zip，并刷新根目录 update.json
+```
+
+版本源是唯一文件 `versions.env`：`APP_VERSION`（跟随上游）、`MODULE_REV`（模块脚本自身修订）、
+`NODE_PACKAGE` / `NODE_VERSION`（须 ≥22.5，依赖内置 `node:sqlite`）、`GITHUB_REPO`、`ZIP_BASENAME`。
+
+查询上游是否有新版（只读）：
+
+```bash
+bash tools/check-update.sh          # 打印当前/最新
+bash tools/check-update.sh --bump   # 顺手把 versions.env 改成最新版
+```
+
+网络受限时：`export PROXY=socks5://127.0.0.1:7890`（构建机直连可用时无需设置）。
+
+### 9.2 发布流程
+
+```bash
+git add -A && git commit -m "chore: bump to <新版本>"
+git push origin main                       # 必须推 main：update.json 通过 raw/main 被管理器读取
+git tag v<新版本> && git push origin v<新版本>
+gh release create v<新版本> dist/9router-Magisk-<新版本>.zip \
+  --title "9Router Magisk <新版本>" --notes "变更说明"
+```
+
+约束与注意：
+- **附件名必须等于 `update.json` 里的 `zipUrl` 文件名**（构建脚本已保证一致）；
+- 必须是**最新（latest）**的正式 Release，否则 `releases/latest/download/…` 会 404；
+- 只发 Release 不推 `main`，管理器读到的仍是旧版本信息；
+- 仓库根目录的 `update.json` 由 `build-module.sh` 每次构建自动重写，不需要手改。
+
+### 9.3 已验证的发布闭环
+
+`module.prop` 的 `updateJson` → `raw.githubusercontent.com/…/main/update.json` →
+`github.com/<repo>/releases/latest/download/9router-Magisk-<版本>.zip` → Release 附件，四处名字一致。
+首个自维护版本 `v0.5.75-r1` 已按此流程发布并验证（`update.json` 200、下载链接 200）。
+
+### 9.4 从 README 移出的其他内容
+
+- 运行时/应用的下载与校验细节、目录结构、`env.sh` 每一项含义：见本文档 §5、§6；
+- 控制面板与密码策略、LAN 与 API Key 的关系：见 §4 与 §3.1；
+- 真机验证记录与踩坑清单：见 §6（验证记录）与 §8。
