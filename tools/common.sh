@@ -13,7 +13,10 @@ DEB_CACHE="$CACHE/termux"
 APP_CACHE="$CACHE/npm"
 STAGE="$ROOT/.stage"
 DIST="$ROOT/dist"
-MODULE_ID=9router
+# 模块 ID 必须以字母开头：ReSukiSU / KernelSU-Next 等分支会按
+# /^[a-zA-Z][a-zA-Z0-9._-]+$/ 校验，id=9router（数字开头）会被判为
+# "Invalid module ID"，导致安装/卸载失败、且开机不执行 service.sh。
+MODULE_ID=ksu_9router
 
 # 日志走 stderr，避免污染 $(download_deb ...) 这类命令替换的返回值
 info() { printf "\033[36m[build]\033[0m %s\n" "$*" >&2; }

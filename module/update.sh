@@ -15,7 +15,8 @@ PREV=$(cat "$DATA/prev-version" 2>/dev/null)
 
 switch_to() { # $1=版本
   rm -f "$MODDIR/app" 2>/dev/null
-  ln -s "$MODDIR/versions/$1/app" "$MODDIR/app"
+  # 相对软链：与 customize.sh 保持一致，模块目录整体移动后依然有效
+  ln -s "versions/$1/app" "$MODDIR/app"
   echo "$CUR" > "$DATA/prev-version"
   echo "$1" > "$DATA/current-version"
   printf 'restart' > "$DATA/control-request"

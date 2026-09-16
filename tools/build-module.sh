@@ -71,8 +71,10 @@ done
 size=$(du -sh "$mod" | awk '{print $1}')
 out="$DIST/$zip_name"
 rm -f "$out"
-( cd "$DIST" && zip -9 -q -r "$(basename "$out")" "$(basename "$mod")" ) \
-  || die "打包失败（需要 zip）"
+# 关键：必须把模块目录的“内容”打进 zip 根目录（module.prop 位于归档根，
+# 不能带顶层目录），否则 Magisk / KernelSU 会报
+# "SPECIFIC FILE NOT FOUND IN archive" / 找不到 module.prop
+( cd "$mod" && zip -9 -q -r "$out" . ) || die "打包失败（需要 zip）"
 
 info "模块目录: $mod ($size)"
 info "刷机包  : $out ($(du -h "$out" | awk '{print $1}'))"

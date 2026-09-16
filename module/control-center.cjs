@@ -93,6 +93,7 @@ small{color:#8b98a5}
  <div class="row"><span>服务状态</span><span>${s.running ? '运行中' : '已停止'} (PID ${s.pid || '-'})</span></div>
  <div class="row"><span>内存占用</span><span>${s.rssMB} MB</span></div>
  <div class="row"><span>面板进程</span><span>${s.panelRunning ? s.panelRssMB + ' MB' : '未运行'}</span></div>
+ <div class="row"><span>合计内存</span><span>${s.rssMB + (s.panelRunning ? s.panelRssMB : 0)} MB</span></div>
  <div class="row"><span>应用版本</span><span>${s.version}</span></div>
 </div>
 <div class="card">
@@ -107,7 +108,8 @@ small{color:#8b98a5}
  <button class="btn" onclick="op('${s.running ? 'stop' : 'start'}')">${s.running ? '停止服务' : '启动服务'}</button>
  <button class="btn g" onclick="op('restart')">重启服务</button>
  <button class="btn g" onclick="op('${s.lan ? 'lan-off' : 'lan-on'}')">${s.lan ? '切回仅本机' : '开放局域网'}</button>
- <small><br>操作由守护进程执行，约 5 秒内生效。</small>
+ <button class="btn g" onclick="if(confirm('关闭后本页面立即失效（约 5 秒内），需要时在手机终端执行 9router ui on 重新开启。继续？'))op('panel-off')">关闭控制面板（省内存）</button>
+ <small><br>操作由守护进程执行，约 5 秒内生效。面板本身约占 30MB 内存，不用时可以关掉。</small>
 </div>
 </div><script>
 function op(name){

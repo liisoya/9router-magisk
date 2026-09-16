@@ -1,11 +1,14 @@
-name: Build & Release 9router Magisk Module
+name: Build & Release 9Router Module
+
+# 触发方式：
+#  1) 推送 v* 标签 → 构建 + 创建/更新对应 Release，并把刷新后的 update.json 同步回 main
+#  2) 手动 workflow_dispatch → 只构建并上传 artifact（不建 Release）
+# 版本号来自 versions.env（APP_VERSION + MODULE_REV），打标签前先改它。
 
 on:
   push:
-    branches:
-      - main
     tags:
-      - v*
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -13,150 +16,56 @@ permissions:
 
 jobs:
   build:
-    name: Build Ultra-Lite 9router Magisk Bundle
+    name: Build module zip
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
-      - name: Expand Virtual Memory (10GB Swap)
-        run: |
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile /swapfile
-          sudo fallocate -l 10G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=10240
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
-
-      - name: Checkout 9router-magisk
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils xz-utils python3 zip curl openssl dpkg
+
+      - name: Fetch Android runtime (Termux official packages)
+        run: bash tools/fetch-runtime.sh
+
+      - name: Fetch upstream prebuilt app (npm)
+        run: bash tools/fetch-app.sh
+
+      - name: Assemble module zip
+        run: bash tools/build-module.sh
+
+      - name: Show artifact info
+        run: |
+          ls -lh dist/*.zip
+          cat update.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          node-version: 22
+          name: 9router-module-zip
+          path: dist/*.zip
+          if-no-files-found: error
 
-      - name: Clone Upstream 9router Source
-        run: |
-          git clone --depth=1 https://github.com/decolua/9router.git 9router-src
-          echo "Upstream cloned successfully!"
-
-      - name: Apply Extra Providers & Logos Patch
-        run: |
-          node scripts/patch_9router.js 9router-src
-          echo "380+ providers and logos applied successfully!"
-
-      - name: Build 9router Next.js Standalone
-        run: |
-          cd 9router-src
-          npm install --legacy-peer-deps --no-audit --no-fund
-          npm run build || npx next build
-          echo "Standalone build completed!"
-
-      - name: Assemble Magisk Module Package
-        run: |
-          mkdir -p dist/9router-module/bin
-          mkdir -p dist/9router-module/lib
-          mkdir -p dist/app-bundle/9router
-
-          # Copy Magisk scripts & standard installer files
-          cp magisk-module/action.sh dist/9router-module/
-          cp magisk-module/service.sh dist/9router-module/
-          cp magisk-module/module.prop dist/9router-module/
-          cp magisk-module/update.json dist/9router-module/
-          cp magisk-module/control-center.cjs dist/9router-module/
-          cp magisk-module/customize.sh dist/9router-module/
-
-          chmod +x dist/9router-module/*.sh dist/9router-module/*.cjs
-
-          # Copy Standalone 9router Server files including dotfiles (use /. to capture hidden dirs)
-          if [ -d "9router-src/.next/standalone" ]; then
-            cp -rf 9router-src/.next/standalone/. dist/app-bundle/9router/
-          else
-            cp -rf 9router-src/. dist/app-bundle/9router/
-          fi
-
-          # Ensure complete production .next build (BUILD_ID, manifests, server, static)
-          mkdir -p dist/app-bundle/9router/.next
-          cp -rf 9router-src/.next/. dist/app-bundle/9router/.next/
-
-          # Copy public, custom-server, open-sse, and missing dependencies as per 9router Dockerfile
-          cp -rf 9router-src/public dist/app-bundle/9router/ 2>/dev/null || true
-          cp -rf 9router-src/custom-server.js dist/app-bundle/9router/ 2>/dev/null || true
-          cp -rf 9router-src/open-sse dist/app-bundle/9router/ 2>/dev/null || true
-          mkdir -p dist/app-bundle/9router/src
-          cp -rf 9router-src/src/mitm dist/app-bundle/9router/src/ 2>/dev/null || true
-          mkdir -p dist/app-bundle/9router/node_modules
-          cp -rf 9router-src/node_modules/node-forge dist/app-bundle/9router/node_modules/ 2>/dev/null || true
-          cp -rf 9router-src/node_modules/next dist/app-bundle/9router/node_modules/ 2>/dev/null || true
-          cp -rf 9router-src/node_modules/sql.js dist/app-bundle/9router/node_modules/ 2>/dev/null || true
-          cp -rf 9router-src/node_modules/node-machine-id dist/app-bundle/9router/node_modules/ 2>/dev/null || true
-
-          # AGGRESSIVE PURGE OF BUILD JUNK:
-          cd dist/app-bundle/9router
-          # 1. Remove duplicate standalone inside .next
-          rm -rf .next/standalone 2>/dev/null || true
-          # 2. Remove build cache & trace profiles
-          rm -rf .next/cache .next/trace .next/diagnostics 2>/dev/null || true
-          # 3. Remove non-ARM64 / x64 host platform native binaries
-          rm -rf node_modules/@img/sharp-libvips-linux-x64 node_modules/@img/sharp-linux-x64 2>/dev/null || true
-          # 4. Remove TypeScript sources, declarations, sourcemaps, and nft traces
-          find . -type f \( -name "*.d.ts" -o -name "*.ts" -o -name "*.tsx" -o -name "*.map" -o -name "*.nft.json" \) -delete 2>/dev/null || true
-          # 5. Remove documentation, tests, and git directories
-          find . -type f \( -name "*.md" -o -name "LICENSE*" -o -name "CHANGELOG*" \) -delete 2>/dev/null || true
-          find . -type d \( -name "tests" -o -name "__tests__" -o -name ".github" -o -name ".git" \) -exec rm -rf {} + 2>/dev/null || true
-          cd ../../..
-
-          # Package 9router core into a fast-streaming tar.gz
-          tar -czf dist/9router-module/9router.tar.gz -C dist/app-bundle 9router
-          rm -rf dist/app-bundle
-
-      - name: Download & Bundle Android ARM64 Node.js Runtime
-        run: |
-          mkdir -p /tmp/node-src
-          git clone --depth=1 https://github.com/FaaRamadhann/Magisk-Node.js.git /tmp/node-src
-
-          # Install native Android Bionic ARM64 node binary
-          cp -f /tmp/node-src/system/usr/lib/node/node dist/9router-module/bin/node.bin
-
-          # Install shared libraries & SSL certs
-          cp -rf /tmp/node-src/system/usr/lib/node/lib/* dist/9router-module/lib/
-          cp -f /tmp/node-src/system/usr/lib/node/cacert.pem dist/9router-module/lib/cacert.pem
-          cp -f /tmp/node-src/system/usr/lib/node/openssl.cnf dist/9router-module/lib/openssl.cnf
-
-          # Install node launcher wrapper
-          cp -f magisk-module/node-wrapper.sh dist/9router-module/bin/node
-
-          chmod 0755 dist/9router-module/bin/node
-          chmod 0755 dist/9router-module/bin/node.bin
-          chmod 0755 dist/9router-module/lib/*.so*
-          rm -rf /tmp/node-src
-
-      - name: Compress & Create Ultra-Lite ZIP
-        run: |
-          cd dist/9router-module
-          zip -9 -r ../9router-magisk-module.zip .
-          cd ../..
-          ls -lh dist/9router-magisk-module.zip
-
-      - name: Create GitHub Release
+      - name: Create / update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.5.39
-          name: "9router Magisk Module v0.5.39 (Purged Build Junk & Ultra-Lite)"
-          body: |
-            ## 9router Magisk Module v0.5.39 (Cleaned & Optimized)
-            - **🧹 Aggressive Build Junk Purge**:
-              - Removed duplicate nested `.next/standalone` folder (~68MB saved).
-              - Removed non-ARM64 / x64 host platform native binaries (`sharp-libvips-linux-x64`) (~18MB saved).
-              - Removed build trace profiles (`.next/trace`) (~5.3MB saved).
-              - Removed 1,600+ useless `.ts`/`.d.ts` source files, sourcemaps (`.map`), and `.nft.json` trace files.
-              - Saves ~100MB of uncompressed storage & RAM footprint on Android!
-            - **🔧 Intact Production Build**: Kept all critical production manifests (`BUILD_ID`, `routes-manifest.json`, `server/` routes).
-            - **⚡ Ultra-Fast RAM Streaming Extraction**: 9router core is streamed directly via RAM pipe (`unzip -p | tar -xz`) in ~5s.
-            - **📊 Live Interactive Progress**: Uses `SKIPUNZIP=1` with clear step indicators (`[1/4]`, `[2/4]`, `[3/4]`, `[4/4]`).
-            - **100% Standalone Android Bionic Node.js**: Built-in ARM64 Node.js runtime + libraries (`libcrypto`, `libssl`, `libcares`, `libicu`, `libc++_shared`, CA bundle).
-            - **123+ AI Providers & Web UI Control Center on Port 20129**.
-          files: dist/9router-magisk-module.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: dist/*.zip
+          generate_release_notes: true
+
+      - name: Sync update.json back to main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          if git diff --cached --quiet; then
+            echo "update.json 无变化，跳过"
+          else
+            git commit -m "chore(release): sync update.json for ${{ github.ref_name }}"
+            git push origin HEAD:main
+          fi

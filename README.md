@@ -33,7 +33,7 @@
 | 两个界面 | Dashboard `20128`（含 OpenAI 兼容 `/v1`）+ 独立控制面板 `20129` |
 | 本机 + 局域网 | 本机直连；局域网设备带 API Key 即可用 |
 | 密码不怕忘 | 默认 `123456`，当前密码直接显示在模块详情页与 `9router status` |
-| 轻量 | 网关自身空闲仅占十几 MB 内存 |
+| 轻量 | 核心空闲约 90MB（PSS）；控制面板可随时关掉，省约 30MB |
 
 > 仅支持 **arm64-v8a** 设备。
 
@@ -59,7 +59,7 @@ API Key  : sk-xxxxxx
 ```
 
 **常用命令**（手机终端执行；若提示找不到 `9router`，用完整路径
-`/data/adb/modules/9router/system/bin/9router`）
+`/data/adb/modules/ksu_9router/system/bin/9router`）
 
 | 命令 | 作用 |
 |---|---|
@@ -70,6 +70,7 @@ API Key  : sk-xxxxxx
 | `9router setpw <密码>` | 修改 Dashboard 密码 |
 | `9router key` | 生成局域网 API Key |
 | `9router lan on\|off` | 开放局域网 / 仅本机 |
+| `9router ui on\|off` | 开/关 20129 控制面板（不用时关掉可省约 40MB 内存） |
 | `9router log` | 查看日志 |
 
 **更新机制**

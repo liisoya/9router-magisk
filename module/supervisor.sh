@@ -9,7 +9,10 @@ LOG=$DATA/log/service.log
 PIDFILE=$DATA/9router.pid
 PANEL_PIDFILE=$DATA/panel.pid
 
-mkdir -p "$DATA/log" 2>/dev/null
+# 数据目录兜底：用户手动 `rm -rf /data/adb/9router` 后仍能自愈
+mkdir -p "$DATA/log" "$DATA/tmp" "$DATA/data" 2>/dev/null
+# 健康检查依赖 curl；个别 ROM 没有 curl，此时退化为"只看进程存活"，避免误判反复重启
+HAVE_CURL=$(command -v curl 2>/dev/null)
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 
@@ -26,11 +29,6 @@ wait_boot() {
   sleep 2
 }
 
-orb_used() { # $1=port -> 非空表示已被占用
-  toybox ss -tln 2>/dev/null | grep -q ":$1 " && echo yes
-  return 0
-}
-
 start_core() {
   . "$DATA/env.sh"
   export HOME=$DATA TMPDIR=$DATA/tmp DATA_DIR=$DATA/data \
@@ -44,9 +42,22 @@ start_core() {
   NODE=$MODDIR/runtime/bin/node.bin
   APP=$MODDIR/app
   [ -x "$NODE" ] || { log "错误: 找不到 node 运行时"; return 1; }
+  # 自愈：旧版安装脚本写的是绝对软链，内容换入正式目录后会悬空
+  if [ ! -f "$APP/custom-server.js" ]; then
+    _VER=$(cat "$DATA/current-version" 2>/dev/null)
+    if [ -n "$_VER" ] && [ -d "$MODDIR/versions/$_VER/app" ]; then
+      ln -sfn "versions/$_VER/app" "$MODDIR/app"
+      log "app 软链已修复 -> versions/$_VER/app"
+    fi
+  fi
   [ -f "$APP/custom-server.js" ] || { log "错误: 找不到应用产物 $APP"; return 1; }
+  # 内存相关参数可用 env.sh 调整：
+  #   MAX_OLD_SPACE      V8 老生代上限（默认 512）
+  #   CORE_NODE_FLAGS    额外 V8 参数（默认 --max-semi-space-size=4，实测省 ~10MB；
+  #                      追求极限可再加 --optimize-for-size，再省 ~9MB，代价是 GC 更积极）
+  [ -n "${CORE_NODE_FLAGS:-}" ] || CORE_NODE_FLAGS=--max-semi-space-size=4
   ( cd "$APP" && exec "$NODE" --dns-result-order=ipv4first \
-      --max-old-space-size=${MAX_OLD_SPACE:-512} custom-server.js ) >> "$LOG" 2>&1 &
+      --max-old-space-size=${MAX_OLD_SPACE:-512} $CORE_NODE_FLAGS custom-server.js ) >> "$LOG" 2>&1 &
   CORE_PID=$!
   echo "$CORE_PID" > "$PIDFILE"
   echo -700 > "/proc/$CORE_PID/oom_score_adj" 2>/dev/null
@@ -55,11 +66,15 @@ start_core() {
 }
 
 start_panel() {
-  [ "${PANEL:-1}" = "1" ] || return 0
+  # 必须先读配置再判断：否则 PANEL 被改成 0 之后，本进程内存里仍是旧值，
+  # 面板会被反复拉起来（`9router ui off` 失效）。
+  # 实测：面板 RSS 主要由 Node 基线决定（~47MB），V8 参数优化无收益，
+  # 在意内存请在不需要时直接 `9router ui off` 关掉它。
   . "$DATA/env.sh"
+  [ "${PANEL:-1}" = "1" ] || return 0
   export LD_LIBRARY_PATH=$MODDIR/runtime/lib
   NODE=$MODDIR/runtime/bin/node.bin
-  ( exec "$NODE" --max-old-space-size=32 --dns-result-order=ipv4first \
+  ( exec "$NODE" --max-old-space-size=${PANEL_MAX_OLD_SPACE:-32} --dns-result-order=ipv4first \
       "$MODDIR/control-center.cjs" ) >> "$LOG" 2>&1 &
   echo $! > "$PANEL_PIDFILE"
   log "控制面板已启动 PID=$! PORT=${UI_PORT:-20129}"
@@ -69,6 +84,9 @@ stop_core() { kill $(cat "$PIDFILE" 2>/dev/null) 2>/dev/null; rm -f "$PIDFILE"; 
 stop_panel() { kill $(cat "$PANEL_PIDFILE" 2>/dev/null) 2>/dev/null; rm -f "$PANEL_PIDFILE"; }
 
 health() {
+  # 没有 curl 就跳过 HTTP 探活（进程存活由主循环的 kill -0 保证），
+  # 否则探测永远失败会导致核心被反复重启
+  [ -n "$HAVE_CURL" ] || return 0
   . "$DATA/env.sh"
   url="http://127.0.0.1:${APP_PORT:-20128}/v1/models"
   if [ "${REQUIRE_API_KEY:-false}" = "true" ] && [ -n "${API_KEY:-}" ]; then
@@ -80,24 +98,35 @@ health() {
 }
 
 wait_boot
-log "守护进程就绪 (node=$( $MODDIR/runtime/bin/node.bin -v 2>/dev/null ))"
+# 探针必须单独带 LD_LIBRARY_PATH：否则动态链接器会报
+# "CANNOT LINK EXECUTABLE ... libcares.so not found"（只是噪音，不影响运行）。
+# 注意不要全局 export，避免系统 curl/toybox 误加载本模块的 .so。
+NODE_VER=$(LD_LIBRARY_PATH=$MODDIR/runtime/lib "$MODDIR/runtime/bin/node.bin" -v 2>/dev/null)
+log "守护进程就绪 (node=${NODE_VER:-未知}, curl=${HAVE_CURL:-无})"
 
 FAILURES=0
 SINCE=$(date +%s)
-LASTCHECK=$SINCE
+STOPPED=0
+
+# 读一次配置：HEALTH_INTERVAL 可调大以减少唤醒/探测开销
+. "$DATA/env.sh"
+HEALTH_EVERY=$(( ${HEALTH_INTERVAL:-60} / 5 )); [ "$HEALTH_EVERY" -ge 1 ] || HEALTH_EVERY=1
+ROTATE_EVERY=$(( 300 / 5 ))   # 日志大小每 5 分钟看一次（见下：避免每 5s fork 一个 wc）
+
 start_core || true
 CORE_PID=$(cat "$PIDFILE" 2>/dev/null)
 start_panel
 
+TICKS=0
 while true; do
   sleep 5
-  rotate
+  TICKS=$((TICKS + 1))
 
-  # 面板挂了直接补起来（它很轻，不做退避）
-  if [ "${PANEL:-1}" = "1" ] && [ ! -f "$PANEL_PIDFILE" ]; then start_panel; fi
+  # 面板挂了直接补起来（它很轻，不做退避）；PANEL=0 时 start_panel 内部直接返回
+  [ "${STOPPED:-0}" = "1" ] || { [ -f "$PANEL_PIDFILE" ] || start_panel; }
 
-  # 核心服务存活检查
-  if [ -z "${CORE_PID:-}" ] || ! kill -0 "$CORE_PID" 2>/dev/null; then
+  # 核心服务存活检查（kill -0 是内建，不产生子进程）
+  if [ "${STOPPED:-0}" != "1" ] && { [ -z "${CORE_PID:-}" ] || ! kill -0 "$CORE_PID" 2>/dev/null; }; then
     log "核心服务已退出"
     stop_panel
     UPTIME=$(( $(date +%s) - SINCE ))
@@ -109,7 +138,7 @@ while true; do
       DELAY=$((FAILURES * 3))
     fi
     sleep "$DELAY"
-    start_core && { CORE_PID=$(cat "$PIDFILE" 2>/dev/null); SINCE=$(date +%s); [ "${PANEL:-1}" = "1" ] && start_panel; }
+    start_core && { CORE_PID=$(cat "$PIDFILE" 2>/dev/null); SINCE=$(date +%s); start_panel; }
     continue
   fi
 
@@ -119,23 +148,24 @@ while true; do
     rm -f "$DATA/control-request"
     log "收到操作请求: $REQ"
     case "$REQ" in
-      start)   [ -f "$PIDFILE" ] || start_core ;;
-      stop)    stop_panel; stop_core ;;
-      restart) stop_panel; stop_core; sleep 2; start_core; start_panel ;;
+      start)   STOPPED=0; [ -f "$PIDFILE" ] || start_core ;;
+      stop)    STOPPED=1; stop_panel; stop_core ;;
+      restart) STOPPED=0; stop_panel; stop_core; sleep 2; start_core; start_panel ;;
       lan-on)  sed -i 's/^BIND_HOST=.*/BIND_HOST=0.0.0.0/' "$DATA/env.sh"; stop_core; sleep 2; start_core ;;
       lan-off) sed -i 's/^BIND_HOST=.*/BIND_HOST=127.0.0.1/' "$DATA/env.sh"; stop_core; sleep 2; start_core ;;
-      panel-on)  sed -i 's/^PANEL=.*/PANEL=1/' "$DATA/env.sh"; start_panel ;;
-      panel-off) sed -i 's/^PANEL=.*/PANEL=0/' "$DATA/env.sh"; stop_panel ;;
+      panel-on)  sed -i 's/^PANEL=.*/PANEL=1/' "$DATA/env.sh"; PANEL=1; STOPPED=0; start_panel ;;
+      panel-off) sed -i 's/^PANEL=.*/PANEL=0/' "$DATA/env.sh"; PANEL=0; stop_panel ;;
     esac
     CORE_PID=$(cat "$PIDFILE" 2>/dev/null)
     SINCE=$(date +%s); FAILURES=0
     continue
   fi
 
-  # 健康检查（每 60s 一次）
-  NOW=$(date +%s)
-  if [ $((NOW - LASTCHECK)) -ge 60 ]; then
-    LASTCHECK=$NOW
+  # 日志轮转：低频执行，避免每 5s fork 一次 wc -c（一天可省约 1.7 万次）
+  [ $((TICKS % ROTATE_EVERY)) -eq 0 ] && rotate
+
+  # 健康检查（默认每 60s，可由 env.sh 的 HEALTH_INTERVAL 调整）
+  if [ "${STOPPED:-0}" != "1" ] && [ $((TICKS % HEALTH_EVERY)) -eq 0 ]; then
     health || { log "健康检查失败，重启服务"; stop_panel; stop_core; sleep 2; start_core && CORE_PID=$(cat "$PIDFILE" 2>/dev/null); start_panel; }
   fi
 done

@@ -32,7 +32,7 @@
 设备上布局：
 
 ```
-/data/adb/modules/9router/
+/data/adb/modules/ksu_9router/     # 模块 ID 必须以字母开头（ReSukiSU 校验 /^[a-zA-Z][a-zA-Z0-9._-]+$/）
   runtime/bin/node.bin            # 只读运行时
   runtime/lib/*.so, cacert.pem
   versions/0.5.75/…               # 每版一份应用产物
@@ -153,6 +153,35 @@ spawn(RUNTIME, ["--dns-result-order=ipv4first", "--max-old-space-size=6144", ser
 
 ---
 
+### 3.4 内存与保活开销（安卓真机实测，2026-09-16）
+
+测试机：ReSukiSU / Android 16（12GB）。
+
+| 进程 | RSS | PSS（更接近真实占用） | 备注 |
+|---|---|---|---|
+| 核心（Next + 9Router） | ~110 MB | **~93 MB** | 空闲态，已跑过一次 `/v1/models` |
+| 控制面板（20129） | ~47 MB | **~30 MB** | 不需要时 `9router ui off` 直接省掉 |
+| supervisor（sh 保活循环） | ~4 MB | **~1 MB** | 保活本身几乎不占内存 |
+
+结论：**保活机制的开销可以忽略（PSS ≈ 1MB）**，真正能省的是两个进程：
+
+1. **面板**：`9router ui off`（或面板页上的"关闭控制面板"按钮）。
+   面板 RSS 由 Node 基线决定（ICU/动态库/V8 代码段），实测 V8 参数
+   （`--max-semi-space-size`、`--jitless`、`--optimize-for-size`）对它**没有可测量收益**，
+   所以默认不动它的参数——要省就关掉。
+2. **核心**：`env.sh` 的 `CORE_NODE_FLAGS`（默认 `--max-semi-space-size=4`）实测省 ~5–10MB；
+   追加 `--optimize-for-size` 可再省（实测 124MB → 105MB，约 −19MB，代价是 GC 更积极）。
+
+保活循环本身的开销优化（本次改动）：
+
+- 日志轮转从「每 5s fork 一个 `wc -c`」改为每 5 分钟一次 → 一天少约 1.7 万次 fork；
+- 健康检查的时间判断从 `date +%s` 改为 tick 计数，间隔由 `HEALTH_INTERVAL`（默认 60s）控制；
+- 核心崩溃检测仍是 5 秒一轮（`kill -0` 是 shell 内建，不产生子进程），**保活灵敏度不变**；
+- `stop` 现在是真停机（此前停止后会被守护循环立刻拉起）；
+- `PANEL` 必须先重读 `env.sh` 再判断，否则 `ui off` 会在数秒后失效（已修）。
+
+---
+
 ## 4. 默认运行参数（本机 + LAN 都要，安全从简）
 
 ```
@@ -240,6 +269,27 @@ CI（`.github/workflows/`，**全部 `workflow_dispatch`，无 schedule**）：
 `/system/bin/su` 仍被 SUSFS 隐藏，但可用 KernelSU 自身通道获取 root：
 `/data/adb/ksu/bin/busybox sh -c …` → `uid=0(root) context=u:r:ksu:s0`。
 
+### 7.1 root 管理器兼容性
+
+| 管理器 / 分支 | 安装机制 | 状态 |
+|---|---|---|
+| KernelSU 0.9.x（小米 6X） | 直接落盘 `/data/adb/modules/<id>` | ✅ 真机验证：安装 / 开机自启 / 面板 / 局域网 / 热更新 |
+| KernelSU 分支（带模块镜像：`modules.img` + `modules_update.img`） | 更新时先暂存进镜像，重启才换入 | ✅ 真机验证（同一台 6X） |
+| ReSukiSU 4.1.0（ksud 4.1.0-1292 / Android 16） | 暂存 `/data/adb/modules_update/<id>` + `update` 标记，重启换入 | ✅ 真机验证：安装 / 卸载 / 重启生效 / 服务自启 / CLI / 面板 |
+| Magisk（官方） | 首次直接落盘，更新走 `/data/adb/modules_update/<id>` | ⚠️ 未真机验证；安装约定与上表同源（`$MODPATH` / `ui_print` / `abort` / `service.sh` / `uninstall.sh` 均按 Magisk 规范） |
+| APatch | Magisk 风格模块 | ⚠️ 未真机验证；不使用 `$MAGISK_VER` / `$API`，其余同 Magisk |
+
+跨管理器必须满足的两条约束（当前实现已满足）：
+
+1. **模块 ID 首字符必须是字母**。ReSukiSU / KernelSU-Next 等按
+   `/^[a-zA-Z][a-zA-Z0-9._-]+$/` 校验：`id=9router`（数字开头）会被判 `Invalid module ID`，
+   表现为**安装失败、卸载失败、且开机不执行 `service.sh`**（模块永远起不来）。
+   本模块 ID 为 `ksu_9router`；
+2. **模块目录在安装期可能位于暂存目录**（`/data/adb/modules_update/<id>` 或模块镜像），
+   因此 `app` 软链必须是**相对路径**（`app -> versions/<ver>/app`），否则换入正式目录后悬空，
+   `app/custom-server.js` 找不到、核心永远起不来。旧版绝对软链已在 `customize.sh` 修正，
+   `supervisor.sh` 另有开机自愈。
+
 ---
 
 ## 8. 方案缺口补充（评审后新增的决策）
@@ -286,11 +336,24 @@ bash tools/check-update.sh --bump   # 顺手把 versions.env 改成最新版
 ### 9.2 发布流程
 
 ```bash
-git add -A && git commit -m "chore: bump to <新版本>"
-git push origin main                       # 必须推 main：update.json 通过 raw/main 被管理器读取
+# 1) 改 versions.env（APP_VERSION / MODULE_REV），本地自检构建
+bash tools/build-module.sh
+
+# 2) 提交并推 main（必须推 main：update.json 通过 raw/main 被管理器读取）
+git add -A && git commit -m "release: <新版本>"
+git push origin main
+
+# 3) 打标签即发布：CI 用同一套脚本重新构建、创建 Release，
+#    并把刷新后的 update.json 同步回 main（.github/workflows/build-release.yml）
 git tag v<新版本> && git push origin v<新版本>
+```
+
+CI 不可用时的手动等价流程：
+
+```bash
 gh release create v<新版本> dist/9router-Magisk-<新版本>.zip \
   --title "9Router Magisk <新版本>" --notes "变更说明"
+git add update.json && git commit -m "chore: sync update.json" && git push
 ```
 
 约束与注意：

@@ -59,7 +59,7 @@ API Key  : sk-xxxxxx
 ```
 
 **Common commands** (run in a terminal on the phone; if `9router` is not found, use the full path
-`/data/adb/modules/9router/system/bin/9router`)
+`/data/adb/modules/ksu_9router/system/bin/9router`)
 
 | Command | Purpose |
 |---|---|
@@ -70,6 +70,7 @@ API Key  : sk-xxxxxx
 | `9router setpw <password>` | Change the Dashboard password |
 | `9router key` | Create a LAN API Key |
 | `9router lan on\|off` | Expose to LAN / localhost only |
+| `9router ui on\|off` | Enable / disable the 20129 control panel (disabling saves ~40 MB RAM) |
 | `9router log` | Show the service log |
 
 **Update mechanism**

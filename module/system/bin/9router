@@ -1,8 +1,22 @@
 #!/system/bin/sh
 # 9Router 命令行入口（仅白名单操作）
-MODDIR=$(dirname "$(dirname "$0")")
+# 本脚本位于 <模块目录>/system/bin/9router，需要回退三级才是模块目录；
+# 若通过 PATH 以裸名调用（$0 不含 /），再用已挂载的模块目录兜底。
 DATA=/data/adb/9router
 ENV=$DATA/env.sh
+
+case "$0" in
+  */*) MODDIR=$(dirname "$(dirname "$(dirname "$0")")") ;;
+  *)   MODDIR="" ;;
+esac
+if [ -z "$MODDIR" ] || [ ! -f "$MODDIR/update.sh" ]; then
+  MODDIR=""
+  for _cand in /data/adb/modules/*/system/bin/9router; do
+    [ -f "$_cand" ] || continue
+    _dir=${_cand%/system/bin/9router}
+    if [ -f "$_dir/update.sh" ]; then MODDIR=$_dir; break; fi
+  done
+fi
 
 [ -f "$ENV" ] || { echo "未安装或未初始化: $ENV"; exit 1; }
 . "$ENV"
@@ -31,7 +45,9 @@ EOF
 req() { printf '%s' "$1" > "$DATA/control-request"; echo "已提交: $1（守护进程将在数秒内执行）"; }
 
 ips() {
-  toybox ip addr 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | tr '\n' ' '
+  # 部分 ROM 的 toybox 不带 ip 子命令，回退到系统 ip（否则本机地址显示为空）
+  { toybox ip addr 2>/dev/null || ip addr 2>/dev/null; } \
+    | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | tr '\n' ' '
 }
 
 status() {
