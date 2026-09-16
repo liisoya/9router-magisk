@@ -1,0 +1,93 @@
+#!/system/bin/sh
+# 9Router 命令行入口（仅白名单操作）
+MODDIR=$(dirname "$(dirname "$0")")
+DATA=/data/adb/9router
+ENV=$DATA/env.sh
+
+[ -f "$ENV" ] || { echo "未安装或未初始化: $ENV"; exit 1; }
+. "$ENV"
+
+usage() {
+  cat <<'EOF'
+用法: 9router <命令> [参数]
+
+  start            启动服务
+  stop             停止服务
+  restart          重启服务
+  status           查看状态（含地址与当前密码）
+  log              查看服务日志（最近 40 行）
+  update [版本]     在线更新应用（默认取上游最新正式版）
+  update-local 文件 用本地 tarball 安装（离线/代理场景）
+  rollback         回滚到上一个版本
+  versions         列出已安装版本
+  setpw <密码>      修改 Dashboard 初始密码
+  key [名称]       创建局域网 API Key（远程调用 /v1 必须要）
+  keys             列出现有 API Key
+  lan on|off       开放局域网 / 仅本机
+  ui  on|off       开/关控制面板
+EOF
+}
+
+req() { printf '%s' "$1" > "$DATA/control-request"; echo "已提交: $1（守护进程将在数秒内执行）"; }
+
+ips() {
+  toybox ip addr 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | tr '\n' ' '
+}
+
+status() {
+  CORE=$(cat "$DATA/9router.pid" 2>/dev/null)
+  PANEL=$(cat "$DATA/panel.pid" 2>/dev/null)
+  VER=$(cat "$DATA/current-version" 2>/dev/null)
+  echo "版本      : ${VER:-未知}"
+  echo "核心服务  : $([ -n "$CORE" ] && kill -0 "$CORE" 2>/dev/null && echo "运行中 PID=$CORE" || echo 已停止)"
+  echo "控制面板  : $([ -n "$PANEL" ] && kill -0 "$PANEL" 2>/dev/null && echo "运行中 PID=$PANEL" || echo 已停止)"
+  echo "监听      : ${BIND_HOST:-0.0.0.0}:${APP_PORT:-20128}"
+  echo "本机地址  : $(ips)"
+  echo "Dashboard : http://$(ips | awk '{print $1}' || echo 127.0.0.1):${APP_PORT:-20128}/dashboard"
+  echo "初始密码  : ${INITIAL_PASSWORD:-123456}"
+  [ -n "${API_KEY:-}" ] && echo "局域网Key : $API_KEY"
+  return 0
+}
+
+case "${1:-}" in
+  start|stop|restart) req "$1" ;;
+  panel-on|panel-off) req "$1" ;;
+  lan)
+    case "${2:-}" in
+      on)  req lan-on ;;
+      off) req lan-off ;;
+      *) usage ;;
+    esac ;;
+  ui)
+    case "${2:-}" in
+      on)  req panel-on ;;
+      off) req panel-off ;;
+      *) usage ;;
+    esac ;;
+  status|st) status ;;
+  info) status ;;
+  log) tail -n "${2:-40}" "$DATA/log/service.log" ;;
+  setpw)
+    [ -n "${2:-}" ] || { echo "需要指定密码"; exit 1; }
+    sed -i "s|^INITIAL_PASSWORD=.*|INITIAL_PASSWORD=$2|" "$ENV"
+    # 同步到模块详情里的描述（防忘记密码）
+    if [ -f "$MODDIR/module.prop" ]; then
+      sed -i "s|\(Dashboard 密码: \)[^ ]*|\1$2|" "$MODDIR/module.prop"
+    fi
+    req restart
+    echo "新密码: $2"
+    ;;
+  versions) ls "$MODDIR/versions" 2>/dev/null ;;
+  key)
+    export LD_LIBRARY_PATH=$MODDIR/runtime/lib
+    exec "$MODDIR/runtime/bin/node.bin" "$MODDIR/apikeys.cjs" create "${2:-android-lan}"
+    ;;
+  keys)
+    export LD_LIBRARY_PATH=$MODDIR/runtime/lib
+    exec "$MODDIR/runtime/bin/node.bin" "$MODDIR/apikeys.cjs" list
+    ;;
+  rollback) exec sh "$MODDIR/update.sh" rollback ;;
+  update) exec sh "$MODDIR/update.sh" update "${2:-latest}" ;;
+  update-local) exec sh "$MODDIR/update.sh" local "${2:-}" ;;
+  *) usage ;;
+esac

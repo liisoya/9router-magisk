@@ -1,0 +1,11 @@
+# 构建产物与下载缓存（都可由 tools/*.sh 重新生成，禁止入库）
+dist/
+.cache/
+.stage/
+
+# 早期手工实验用的运行时提取目录，已由 tools/fetch-runtime.sh 取代
+tools/node-arm64/
+
+# 杂项
+.DS_Store
+*.log

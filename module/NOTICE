@@ -1,0 +1,21 @@
+第三方组件声明
+================
+
+本模块本体脚本基于 MIT 许可，并重用了社区的安卓 Node 运行时打包思路。
+其中包含的第三方二进制均来自 Termux 官方软件仓库（packages.termux.dev），
+未使用任何来路不明的预编译包：
+
+  Node.js          MIT License            © Node.js contributors
+  OpenSSL          Apache-2.0             © OpenSSL Project
+  ICU              ICU License            © Unicode, Inc.
+  libc++           Apache-2.0 w/ LLVM Ex. © LLVM Project
+  c-ares           MIT License            © c-ares authors
+  SQLite           Public Domain
+  zlib             zlib License
+  CA 证书          取自 Debian cacert 集合（Termux ca-certificates 包）
+
+9Router 服务端本体取自官方 npm 包 https://www.npmjs.com/package/9router
+（上游仓库 https://github.com/decolua/9router ，MIT License，© 原作者）。
+本模块不做重新构建，只原样搬运官方发布的预构建产物。
+
+提醒：本模块为 root 权限下的本地服务，请勿把 20128/20129 端口暴露到不可信网络。
